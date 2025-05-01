@@ -1,14 +1,24 @@
+import customtkinter as ctk
 from bs4 import BeautifulSoup
 import requests
 import webbrowser
-import tkinter as tk
-from tkinter import ttk
-from tkinter import messagebox
-from PIL import Image, ImageTk  # Import PIL for image handling
+from PIL import Image, ImageDraw
+from customtkinter import CTkImage
+import platform
+import threading
+from urllib.parse import urljoin
+from queue import Queue
 
-# Define global variables
-active_button_index = None  # Variable to track the index of the active button
-buttons = []  # List to store button references
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
+
+# Constants
+TEXT_COLOR = "#FFFFFF"
+BUTTON_COLOR = "#3B3B3B"
+HOVER_COLOR = "#4A4A4A"
+ACCENT_COLOR = "#1F6AA5"
+FONT = ("Arial", 14)
+TITLE_FONT = ("Arial", 16, "bold")
 
 sports = {
     'Soccer': {
@@ -27,195 +37,228 @@ sports = {
         'Wimbledon': 'https://tennisonline.me/wimbledon-online-stream',
         'US Open': 'https://tennisonline.me/us-open-online-stream'
     }
-}  # Specify the sports, leagues, and their URLs you want to scrape
+}
 
-all_labels = {}
 
-# Function to scrape football game URLs from different leagues
-def scrape_football_streams(league_url, frame):
-    try:
-        # Make a request to the website
-        response = requests.get(league_url)
+class Loader:
+    def __init__(self, parent):
+        self.frame = ctk.CTkFrame(parent)
+        self.label = ctk.CTkLabel(self.frame, text="Loading", font=TITLE_FONT)
+        self.label.pack(pady=10)
+        self.dots = 0
+        self.animation_active = False
 
-        # Check if the request was successful
-        if response.status_code == 200:
-            print("Request successful")
-            print("Response content:", response.text)  # Debug statement
+    def start(self):
+        self.frame.pack(pady=20)
+        self.animation_active = True
+        self.animate()
 
-            # Create BeautifulSoup object
-            soup = BeautifulSoup(response.text, 'html.parser')
+    def stop(self):
+        self.animation_active = False
+        self.frame.pack_forget()
 
-            # Find football game URLs and store them in a list
-            football_urls = []
-            for link in soup.find_all('a', href=True):
-                href = link['href']
-                if 'vs' in href:
-                    teams = href.split('vs')
-                    team1 = teams[0].split('/')[-1].replace('-', ' ').replace('vs', '').title().strip()
-                    team2 = teams[1].split('/')[0].replace('-', ' ').title().strip()
-                    # Remove specific words from the team names
-                    team1_clean = team1.replace(' Watch', '').replace(' Stream', '').replace(' Online', '').replace('Watch ', '')
-                    team2_clean = team2.replace(' Watch', '').replace(' Stream', '').replace(' Online', '').replace('Watch', '')
-                    football_urls.append(f"{team1_clean} vs {team2_clean}")
+    def animate(self):
+        if self.animation_active:
+            self.dots = (self.dots + 1) % 4
+            self.label.configure(text=f"Loading{'.' * self.dots}")
+            self.frame.after(500, self.animate)
 
-            # Display the football game URLs or return None if no games found
-            return football_urls if football_urls else None
-        else:
-            print("Error:", response.status_code)
-            raise ConnectionError("Failed to fetch data from the website.")
-    except Exception as e:
-        print("An error occurred:", str(e))
-        raise
 
-# Function to open the sport streams page
-def open_sport_streams(frame, sport_leagues):
-    global active_button_index  # Access the global active_button_index variable
+class SportsStreamsApp:
+    def __init__(self):
+        self.app = ctk.CTk()
+        self.app.title("Sports Streams")
+        self.cache = {}
+        self.queue = Queue()
+        self.loader = None
+        self.bg_image = None
+        self.current_gradient_size = (0, 0)
 
-    # Clear previous content
-    for widget in frame.winfo_children():
-        widget.destroy()
+        self.is_mobile = platform.system() in ["Android", "iOS"]
+        self.width = 360 if self.is_mobile else 800
+        self.height = 640 if self.is_mobile else 600
+        self.app.geometry(f"{self.width}x{self.height}")
 
-    # Create navbar in the current frame
-    create_navbar(frame)
+        self.create_navbar()
+        self.create_content_frame()
+        self.create_gradient_background()  # ← moved here
+        self.check_queue()
 
-    # Create a canvas with a scrollbar
-    canvas = tk.Canvas(frame)
-    scrollbar = tk.Scrollbar(frame, orient="vertical", command=canvas.yview)
-    scrollable_frame = ttk.Frame(canvas)
+    def create_gradient_background(self):
+        width = self.app.winfo_width() or self.width
+        height = self.app.winfo_height() or self.height
 
-    scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        width = min(width, 1920)
+        height = min(height, 1080)
 
-    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-    canvas.configure(yscrollcommand=scrollbar.set)
-
-    canvas.pack(side="left", fill="both", expand=True)
-    scrollbar.pack(side="right", fill="y")
-
-    for league, league_url in sport_leagues.items():
-        # Title label for each league
-        title_label = ttk.Label(scrollable_frame, text=f"{league} Today's Matches:", style="Title.TLabel")
-        title_label.pack(pady=5, anchor="w")
-
-        # List to store labels for each league
-        league_labels = []
-        all_labels[league] = league_labels
+        if abs(self.current_gradient_size[0] - width) < 100 and \
+           abs(self.current_gradient_size[1] - height) < 100:
+            return
 
         try:
-            football_streams = scrape_football_streams(league_url, frame)
-            if football_streams:
-                for stream in football_streams:
-                    # Create a clickable link label for each stream
-                    link_label = ttk.Label(scrollable_frame, text=f"{stream}", style="Stream.TLabel", foreground="blue", cursor="hand2")
-                    link_label.pack(anchor="w")
-                    league_labels.append(link_label)
+            gradient = Image.new('RGB', (256, 256), color=(0, 0, 0))
+            draw = ImageDraw.Draw(gradient)
 
-                    # Bind the label to open the link when clicked
-                    link_label.bind("<Button-1>", lambda event, url=stream: webbrowser.open_new(url))
+            for y in range(256):
+                r = int((0x1F * (256 - y) + 0x2E * y) / 256)
+                g = int((0x3B * (256 - y) + 0x2E * y) / 256)
+                b = int((0x4D * (256 - y) + 0x2E * y) / 256)
+                draw.line([(0, y), (256, y)], fill=(r, g, b))
+
+            gradient = gradient.resize((width, height), Image.Resampling.LANCZOS)
+
+            if self.bg_image:
+                self.bg_label.configure(image=None)
+                self.bg_image = None
+
+            self.bg_image = ctk.CTkImage(light_image=gradient, size=(width, height))
+            self.current_gradient_size = (width, height)
+
+            if not hasattr(self, 'bg_label'):
+                self.bg_label = ctk.CTkLabel(self.app, image=self.bg_image, text="")
+                self.bg_label.place(x=0, y=0, relwidth=1, relheight=1)
             else:
-                # If no games found initially, display "No games today" under the league title
-                no_games_label = ttk.Label(scrollable_frame, text="No games today", style="NoGames.TLabel")
-                no_games_label.pack(anchor="w")
-                league_labels.append(no_games_label)
+                self.bg_label.configure(image=self.bg_image)
+
+            self.nav.lift()
+            self.content_frame.lift()
+
         except Exception as e:
-            messagebox.showerror("Error", f"An error occurred: {str(e)}")
+            print(f"Error creating gradient: {e}")
+            self.app.configure(fg_color="#2E2E2E")
 
-    # Close the loading message after all frames have been loaded
-    messagebox.showinfo("Loading", "All data loaded successfully.")
+    def create_navbar(self):
+        self.nav = ctk.CTkFrame(self.app, height=60, fg_color=BUTTON_COLOR)
+        self.nav.pack(side="top", fill="x", pady=5, padx=5)
+        self.nav.lift()
 
-# Function to create the navbar with icons
-def create_navbar(frame):
-    global active_button_index  # Access the global active_button_index variable
-    global buttons  # Access the global buttons list
+        icons = {
+            'Soccer': 'img/soccer-ball.ico',
+            'Basketball': 'img/basketball-ball.ico',
+            'Tennis': 'img/tennis.ico'
+        }
 
-    navbar_frame = ttk.Frame(frame)
-    navbar_frame.pack(side=tk.TOP, fill=tk.X)
+        for sport, leagues in sports.items():
+            try:
+                icon_img = CTkImage(Image.open(icons[sport]), size=(24, 24))
+            except Exception:
+                icon_img = None
 
-    # Define icons for each sport
-    soccer_icon = Image.open('img/soccer-ball.ico').resize((32, 32))
-    basketball_icon = Image.open('img/basketball-ball.ico').resize((32, 32))
-    tennis_icon = Image.open('img/tennis.ico').resize((32, 32))
+            btn = ctk.CTkButton(
+                self.nav,
+                text=sport,
+                image=icon_img,
+                compound="left",
+                command=lambda l=leagues: self.on_sport_click(l),
+                width=120,
+                height=40,
+                fg_color=BUTTON_COLOR,
+                hover_color=HOVER_COLOR,
+                font=FONT
+            )
+            btn.image = icon_img
+            btn.pack(side="left", padx=5, pady=5)
 
-    # Convert icons to Tkinter-compatible format
-    soccer_icon_tk = ImageTk.PhotoImage(soccer_icon)
-    basketball_icon_tk = ImageTk.PhotoImage(basketball_icon)
-    tennis_icon_tk = ImageTk.PhotoImage(tennis_icon)
+    def create_content_frame(self):
+        self.content_frame = ctk.CTkScrollableFrame(
+            self.app,
+            width=self.width - 20,
+            height=self.height - 80,
+            fg_color="transparent"
+        )
+        self.content_frame.pack(padx=10, pady=(5, 10), fill="both", expand=True)
+        self.content_frame.lift()
 
-    for sport, leagues in sports.items():
-        # Button for each sport in the navbar with icon
-        if sport == 'Soccer':
-            sport_button = ttk.Button(navbar_frame, text=sport, image=soccer_icon_tk, compound=tk.LEFT, command=lambda l=leagues: open_sport_streams(frame, l), style="Button.TButton")
-        elif sport == 'Basketball':
-            sport_button = ttk.Button(navbar_frame, text=sport, image=basketball_icon_tk, compound=tk.LEFT, command=lambda l=leagues: open_sport_streams(frame, l), style="Button.TButton")
-        elif sport == 'Tennis':
-            sport_button = ttk.Button(navbar_frame, text=sport, image=tennis_icon_tk, compound=tk.LEFT, command=lambda l=leagues: open_sport_streams(frame, l), style="Button.TButton")
+    def on_sport_click(self, leagues):
+        self.clear_content()
+        self.loader = Loader(self.content_frame)
+        self.loader.start()
 
-        sport_button.pack(side=tk.LEFT, padx=10, pady=5)
-        buttons.append(sport_button)
+        threading.Thread(
+            target=self.fetch_leagues_data,
+            args=(leagues,),
+            daemon=True
+        ).start()
 
-        # Bind hover events to the buttons
-        sport_button.bind("<Enter>", lambda event, button=sport_button: button.config(background="lightgrey"))
-        sport_button.bind("<Leave>", lambda event, button=sport_button: button.config(background="SystemButtonFace"))
+    def fetch_leagues_data(self, leagues):
+        results = []
+        for league_name, url in leagues.items():
+            if url in self.cache:
+                results.append((league_name, self.cache[url]))
+            else:
+                games = self.scrape_streams(url)
+                self.cache[url] = games
+                results.append((league_name, games))
+        self.queue.put(results)
 
-        # Bind the button click event
-        sport_button.bind("<Button-1>", lambda event, button=sport_button: handle_button_click(button))
+    def scrape_streams(self, url):
+        try:
+            response = requests.get(url, timeout=10)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            matches = []
 
-        # Keep a reference to the images to avoid garbage collection
-        if sport == 'Soccer':
-            sport_button.image = soccer_icon_tk
-        elif sport == 'Basketball':
-            sport_button.image = basketball_icon_tk
-        elif sport == 'Tennis':
-            sport_button.image = tennis_icon_tk
+            for link in soup.find_all('a', href=True):
+                href = link['href']
+                if 'vs' in href.lower():
+                    full_url = urljoin(url, href)
+                    parts = href.split('/')[-1].replace('-', ' ').split('vs')
+                    if len(parts) < 2:
+                        continue
+                    team1 = parts[0].strip().title()
+                    team2 = parts[1].strip().title()
+                    matches.append((f"{team1} vs {team2}", full_url))
 
+            return matches if matches else [("No games available", None)]
+        except Exception as e:
+            return [(f"Error: {str(e)}", None)]
 
-# Function to handle button click event
-def handle_button_click(button):
-    global active_button_index  # Access the global active_button_index variable
-    global buttons  # Access the global buttons list
+    def update_content(self, results):
+        self.loader.stop()
+        self.clear_content()
 
-    for i, btn in enumerate(buttons):
-        if btn == button:
-            active_button_index = i  # Update the active_button_index
-            btn.config(background="blue")  # Set the color of the clicked button to blue
-        else:
-            btn.config(background="SystemButtonFace")  # Reset the color of other buttons
+        for league_name, games in results:
+            league_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+            league_frame.pack(fill="x", pady=5, padx=5)
 
-# Main function
-def main():
-    root = tk.Tk()
-    root.title("Sports Streams")
-    root.iconbitmap('img/soccer-ball.ico')
+            ctk.CTkLabel(
+                league_frame,
+                text=f"{league_name}:",
+                font=TITLE_FONT,
+                text_color=ACCENT_COLOR
+            ).pack(anchor="w", pady=(0, 5))
 
-    # Get the screen width and height
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
+            for game_name, url in games:
+                game_label = ctk.CTkLabel(
+                    league_frame,
+                    text=game_name,
+                    font=FONT,
+                    text_color=TEXT_COLOR,
+                    cursor="hand2" if url else "arrow"
+                )
+                game_label.pack(anchor="w", padx=10, pady=2)
 
-    # Calculate the x and y coordinates to center the window
-    x_coordinate = (screen_width - 500) // 2  # Assuming the window width is 800
-    y_coordinate = (screen_height - 600) // 2  # Assuming the window height is 600
+                if url:
+                    game_label.configure(text_color="#1E90FF")
+                    game_label.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
 
-    root.geometry(f"500x600+{x_coordinate}+{y_coordinate}")  # Set window size and position
+    def clear_content(self):
+        for widget in self.content_frame.winfo_children():
+            widget.destroy()
 
-    # Define custom fonts
-    style = ttk.Style()
-    style.configure("Title.TLabel", font=("Helvetica", 16, "bold"))
-    style.configure("Stream.TLabel", font=("Helvetica", 12))
-    style.configure("Button.TButton", font=("Arial", 12, "bold"))
+    def check_queue(self):
+        while not self.queue.empty():
+            results = self.queue.get()
+            self.app.after(0, self.update_content, results)
+        self.app.after(100, self.check_queue)
 
-    # Create navbar
-    create_navbar(root)
+    def on_window_resize(self, event):
+        self.create_gradient_background()
 
-    root.mainloop()
+    def run(self):
+        self.app.bind("<Configure>", self.on_window_resize)
+        self.app.mainloop()
 
 
 if __name__ == "__main__":
-    main()
-
-#if you're reading this sorry :(  this application is not finished but i'm working on it and i'm learning python and tkinter and i'm trying to make it better
-#if you have any ideas or suggestions for me to improve this application, please let me know
-#thank you
-
-# oh yeah and it could be faster but damn it's 2 am and i'm tired of this shit
-# if you need more help and wanna get close and personal with me ig: @tanks.jpeg
-
-
+    app = SportsStreamsApp()
+    app.run()
